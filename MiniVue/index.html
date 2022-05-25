@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="./reactive.js"></script>
+    <script src="./renderer.js"></script>
+    <script src="./createApp.js"></script>
+    <title>Document</title>
+</head>
+
+<body>
+<div id="app"></div>
+
+<script>
+    const App = {
+        data: reactive({
+            counter: 0
+        }),
+        render() {
+            return h("div", null, [
+                h("h2", null, `当前计数: ${this.data.counter}`),
+                h("button", {
+                    // 这里必须使用箭头函数绑定外层this，因为如果写成普通函数
+                    // 由于它是作为事件回调直接调用，其内部的this会绑定window
+                    onClick: () => {
+                        this.data.counter++
+                        console.log(this.data.counter);
+                    }
+                }, "+1")
+            ])
+        }
+    }
+
+    const app = createApp(App);
+    app.mount("#app");
+</script>
+</body>
+
+</html>
