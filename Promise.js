@@ -2,208 +2,272 @@ const PROMISE_STATUS_PENDING = 'pending'
 const PROMISE_STATUS_FULFILLED = 'fulfilled'
 const PROMISE_STATUS_REJECTED = 'rejected'
 
+// thenPromiseList用来存储在then方法的回调函数(onfulfilled, onrejected)中创
+// 建的promise对象之所以要存储它们，是因为我们要在reject方法进行一个这样的判断:
+// (!thenPromiseList.has(this) && this.onRejectedFns.length === 0)
+// 如果一个promise对象的状态变成reject，但是却没有相应的处理程序，那么就应该把
+// reason作为一个错误抛出到全局中，但是如果这个promise对象是在then方法的回调函
+// 数中定义的话就不一样了，因为它们的处理程序写在execFunctionWithCatchError中
+const thenPromiseList = new WeakSet()
+let thenFlag = false
+
 function execFunctionWithCatchError(execFn, value, resolve, reject) {
-    try {
-        const result = execFn(value)
-        // 如果then方法中的onFulfilled或onRejected函数的返回值是一个
-        // Promise对象，那么Promise链中的下一个Promise对象的状态由该
-        // Promise对象进行接管
-         if (result instanceof HYPromise) {
-            result.then(resolve, reject)
-         } else {
-            resolve(result)
-         }
-    } catch (err) {
-        reject(err)
+  try {
+    // 如果then方法中的onFulfilled或onRejected函数的返回值是一个Promise对象，
+    // 那么Promise链中的下一个Promise对象的状态由该Promise对象进行接管
+    // 通过thenFlag来标识then方法回调函数的生命周期(开始 => 结束)
+    thenFlag = true
+    const result = execFn(value)
+    thenFlag = false
+    // 返回值可能是thenablw对象、promise对象和其它值
+    if (result instanceof HYPromise || result?.then instanceof Function) {
+      result.then(resolve, reject)
+    } else {
+      resolve(result)
     }
+  } catch (err) {
+    reject(err)
+  }
 }
 
 class HYPromise {
-    constructor(executor) {
-        this.status = PROMISE_STATUS_PENDING
-        this.value = undefined
-        this.reason = undefined
-        this.onFulfilledFns = []
-        this.onRejectedFns = []
+  constructor(executor) {
+    this.status = PROMISE_STATUS_PENDING
+    this.value = undefined
+    this.reason = undefined
+    this.onFulfilledFns = []
+    this.onRejectedFns = []
 
-        const resolve = (value) => {
-            if (this.status === PROMISE_STATUS_PENDING) {
-                // 添加微任务
-                queueMicrotask(() => {
-                    if (this.status !== PROMISE_STATUS_PENDING) return
-                    this.status = PROMISE_STATUS_FULFILLED
-                    this.value = value
-                    this.onFulfilledFns.forEach(fn => {
-                        fn(this.value)
-                    })
-                });
-            }
+    // 微任务会在本次事件循环最后执行，这就保证了promise对象能在
+    // then方法的回调函数传入进来之后再更改状态
+    // 内层的判断是为了防止在executor中同时执行resolve和reject
+    // 方法，导致promise对象的状态多次发生改变
+    const resolve = (value) => {
+      if (this.status === PROMISE_STATUS_PENDING) {
+        queueMicrotask(() => {
+          if (this.status !== PROMISE_STATUS_PENDING) return
+          this.status = PROMISE_STATUS_FULFILLED
+          this.value = value
+          this.onFulfilledFns.forEach((fn) => fn())
+        })
+      }
+    }
+
+    // resolve和reject函数都箭头函数，他们当中的this其实是外层this
+    // 当promise对象的状态变为rejected时，就要判断它是否有相应的处理
+    // 函数，如果没有,则抛出全局错误(在thenPromiseList中的除外)
+    const reject = (reason) => {
+      if (this.status === PROMISE_STATUS_PENDING) {
+        queueMicrotask(() => {
+          if (this.status !== PROMISE_STATUS_PENDING) return
+          this.status = PROMISE_STATUS_REJECTED
+          this.reason = reason
+          if (!thenPromiseList.has(this) && this.onRejectedFns.length === 0) {
+            throw new Error(reason)
+          }
+          this.onRejectedFns.forEach((fn) => fn())
+        })
+      }
+    }
+
+    // 如果捕获到executor中抛出了错误，则把状态转变为reject
+    // 如果当前promise对象没有相应的处理函数，则直接抛出这个错误
+    try {
+      executor(resolve, reject)
+    } catch (err) {
+      reject(err)
+    }
+
+    // 将在then方法的回调函数中创建的promise对象放进thenPromiseList中
+    if (thenFlag) thenPromiseList.add(this)
+  }
+
+  then(onFulfilled, onRejected) {
+    // 设置默认reject处理函数，这是为了让处理函数中抛出的错误可以延着
+    // promise链向后传递，直到找到reject处理函数
+    const defaultOnRejected = (err) => {
+      throw err
+    }
+    onRejected = onRejected || defaultOnRejected
+
+    // 设置默认resolve处理函数，这是为了防止promise对象的状态变为
+    // fulfilled，而我们没有定义resolve处理函数，这就会导致下面
+    // if(onFulfilled)判断后,execFunctionWithCatchError函数不会
+    // 执行，这就会造成promise对象的状态不会发生改变的问题
+    const defaultOnFulfilled = (value) => {
+      return value
+    }
+    onFulfilled = onFulfilled || defaultOnFulfilled
+
+    return new HYPromise((resolve, reject) => {
+      // 1.如果在then调用的时候, 状态已经确定下来了，那它传入的回调函
+      // 数会被立即执行，就比如下面的代码。
+      // 由于settimeout是宏任务，在宏任务执行之前会清除所有的微任务，
+      // 因此在settimeout的回调函数执行时，p1的状态已经是fulfilled了
+      // const p1 = new HYPromise(resolve => resolve("success"))
+      // p1.then(res => console.log("res1", res))
+      // setTimeout(() => {
+      //   p1.then(res => console.log("res2", res))
+      // }, 0);
+      if (this.status === PROMISE_STATUS_FULFILLED && onFulfilled) {
+        execFunctionWithCatchError(onFulfilled, this.value, resolve, reject)
+      }
+      if (this.status === PROMISE_STATUS_REJECTED && onRejected) {
+        execFunctionWithCatchError(onRejected, this.reason, resolve, reject)
+      }
+
+      // 2.将成功回调和失败的回调放到数组中，等resolve或reject方法中的
+      // 微任务执行时，再遍历这些回调函数，这样就能实现then方法的多次调用
+      if (this.status === PROMISE_STATUS_PENDING) {
+        if (onFulfilled) {
+          this.onFulfilledFns.push(() => {
+            execFunctionWithCatchError(onFulfilled, this.value, resolve, reject)
+          })
         }
-
-        const reject = (reason) => {
-            if (this.status === PROMISE_STATUS_PENDING) {
-                // 添加微任务
-                queueMicrotask(() => {
-                    if (this.status !== PROMISE_STATUS_PENDING) return
-                    this.status = PROMISE_STATUS_REJECTED
-                    this.reason = reason
-                    this.onRejectedFns.forEach(fn => {
-                        fn(this.reason)
-                    })
-                })
-            }
+        if (onRejected) {
+          this.onRejectedFns.push(() => {
+            execFunctionWithCatchError(onRejected, this.reason, resolve, reject)
+          })
         }
+      }
+    })
+  }
 
-        try {
-            executor(resolve, reject)
-        } catch (err) {
+  catch(onRejected) {
+    return this.then(undefined, onRejected)
+  }
+
+  finally(onFinally) {
+    this.then(
+      () => {
+        onFinally()
+      },
+      () => {
+        onFinally()
+      }
+    )
+  }
+
+  static resolve(value) {
+    return new HYPromise((resolve) => resolve(value))
+  }
+
+  static reject(reason) {
+    return new HYPromise((resolve, reject) => reject(reason))
+  }
+
+  static all(promises) {
+    // 问题关键: 什么时候要执行resolve, 什么时候要执行reject
+    return new HYPromise((resolve, reject) => {
+      const values = []
+      promises.forEach((promise) => {
+        promise.then(
+          (res) => {
+            values.push(res)
+            if (values.length === promises.length) {
+              resolve(values)
+            }
+          },
+          (err) => {
             reject(err)
-        }
-    }
+          }
+        )
+      })
+    })
+  }
 
-    then(onFulfilled, onRejected) {
-        const defaultOnRejected = err => {
-            throw err
-        }
-        onRejected = onRejected || defaultOnRejected
-
-        const defaultOnFulfilled = value => {
-            return value
-        }
-        onFulfilled = onFulfilled || defaultOnFulfilled
-
-        return new HYPromise((resolve, reject) => {
-            // 1.如果在then调用的时候, 状态已经确定下来
-            if (this.status === PROMISE_STATUS_FULFILLED && onFulfilled) {
-                execFunctionWithCatchError(onFulfilled, this.value, resolve, reject)
+  static allSettled(promises) {
+    return new HYPromise((resolve) => {
+      const results = []
+      promises.forEach((promise) => {
+        promise.then(
+          (res) => {
+            results.push({
+              status: PROMISE_STATUS_FULFILLED,
+              value: res
+            })
+            if (results.length === promises.length) {
+              resolve(results)
             }
-            if (this.status === PROMISE_STATUS_REJECTED && onRejected) {
-                execFunctionWithCatchError(onRejected, this.reason, resolve, reject)
+          },
+          (err) => {
+            results.push({
+              status: PROMISE_STATUS_REJECTED,
+              value: err
+            })
+            if (results.length === promises.length) {
+              resolve(results)
             }
+          }
+        )
+      })
+    })
+  }
 
-            // 2.将成功回调和失败的回调放到数组中
-            if (this.status === PROMISE_STATUS_PENDING) {
-                if (onFulfilled) this.onFulfilledFns.push(() => {
-                    execFunctionWithCatchError(onFulfilled, this.value, resolve, reject)
-                })
-                if (onRejected) this.onRejectedFns.push(() => {
-                    execFunctionWithCatchError(onRejected, this.reason, resolve, reject)
-                })
-            }
+  static race(promises) {
+    return new HYPromise((resolve, reject) => {
+      promises.forEach((promise) => {
+        // promise.then(res => {
+        //   resolve(res)
+        // }, err => {
+        //   reject(err)
+        // })
+        promise.then(resolve, reject)
+      })
+    })
+  }
+
+  static any(promises) {
+    // resolve必须等到有一个成功的结果
+    // reject所有的都失败才执行reject
+    const reasons = []
+    return new HYPromise((resolve, reject) => {
+      promises.forEach((promise) => {
+        promise.then(resolve, (err) => {
+          reasons.push(err)
+          if (reasons.length === promises.length) {
+            reject(new AggregateError(reasons))
+          }
         })
-    }
-
-    catch (onRejected) {
-        return this.then(undefined, onRejected)
-    } finally(onFinally) {
-        this.then(() => {
-            onFinally()
-        }, () => {
-            onFinally()
-        })
-    }
-
-    static resolve(value) {
-        return new HYPromise((resolve) => resolve(value))
-    }
-
-    static reject(reason) {
-        return new HYPromise((resolve, reject) => reject(reason))
-    }
-
-    static all(promises) {
-        // 问题关键: 什么时候要执行resolve, 什么时候要执行reject
-        return new HYPromise((resolve, reject) => {
-            const values = []
-            promises.forEach(promise => {
-                promise.then(res => {
-                    values.push(res)
-                    if (values.length === promises.length) {
-                        resolve(values)
-                    }
-                }, err => {
-                    reject(err)
-                })
-            })
-        })
-    }
-
-    static allSettled(promises) {
-        return new HYPromise((resolve) => {
-            const results = []
-            promises.forEach(promise => {
-                promise.then(res => {
-                    results.push({
-                        status: PROMISE_STATUS_FULFILLED,
-                        value: res
-                    })
-                    if (results.length === promises.length) {
-                        resolve(results)
-                    }
-                }, err => {
-                    results.push({
-                        status: PROMISE_STATUS_REJECTED,
-                        value: err
-                    })
-                    if (results.length === promises.length) {
-                        resolve(results)
-                    }
-                })
-            })
-        })
-    }
-
-    static race(promises) {
-        return new HYPromise((resolve, reject) => {
-            promises.forEach(promise => {
-                // promise.then(res => {
-                //   resolve(res)
-                // }, err => {
-                //   reject(err)
-                // })
-                promise.then(resolve, reject)
-            })
-        })
-    }
-
-    static any(promises) {
-        // resolve必须等到有一个成功的结果
-        // reject所有的都失败才执行reject
-        const reasons = []
-        return new HYPromise((resolve, reject) => {
-            promises.forEach(promise => {
-                promise.then(resolve, err => {
-                    reasons.push(err)
-                    if (reasons.length === promises.length) {
-                        reject(new AggregateError(reasons))
-                    }
-                })
-            })
-        })
-    }
+      })
+    })
+  }
 }
 
-const p1 = new HYPromise((resolve) => {
-    setTimeout(() => {
-        console.log(1)
-        resolve(2)
-    }, 3000)
+const p1 = new HYPromise((resolve, reject) => {
+  // throw new Error('err')
+  setTimeout(() => {
+    console.log('p0')
+    resolve('p1')
+  }, 1000)
 })
-
-p1.then(res => {
-    return new HYPromise((resolve) => {
-        setTimeout(() => {
-            console.log(res)
-            resolve(3)
-        }, 3000)
+// .then((res) => {
+//   console.log(res);
+// })
+// .catch((err) => {
+//   console.log(err.message);
+// });
+const p2 = p1
+  .then((res) => {
+    return new HYPromise((resolve, reject) => {
+      // throw new Error('err')
+      setTimeout(() => {
+        console.log(res)
+        resolve('p2')
+      }, 1000)
     })
-}).then(res => {
-    return new HYPromise((resolve) => {
+  })
+  .then((res) => {
+    return {
+      then(resolve, reject) {
+        throw new Error('err')
         setTimeout(() => {
-            console.log(res)
-            resolve(4)
-        }, 3000)
-    })
-}).then(res => {
-    console.log(res)
+          console.log(res)
+          resolve('p3')
+        }, 1000)
+      }
+    }
+  })
+const p3 = p2.catch((err) => {
+  console.log(err.message)
 })
