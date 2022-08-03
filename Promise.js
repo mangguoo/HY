@@ -2,29 +2,16 @@ const PROMISE_STATUS_PENDING = 'pending'
 const PROMISE_STATUS_FULFILLED = 'fulfilled'
 const PROMISE_STATUS_REJECTED = 'rejected'
 
-// thenPromiseList用来存储在then方法的回调函数(onfulfilled, onrejected)中创
-// 建的promise对象之所以要存储它们，是因为我们要在reject方法进行一个这样的判断:
-// (!thenPromiseList.has(this) && this.onRejectedFns.length === 0)
-// 如果一个promise对象的状态变成reject，但是却没有相应的处理程序，那么就应该把
-// reason作为一个错误抛出到全局中，但是如果这个promise对象是在then方法的回调函
-// 数中定义的话就不一样了，因为它们的处理程序写在execFunctionWithCatchError中
-const thenPromiseList = new WeakSet()
-let thenFlag = false
-
 function execFunctionWithCatchError(execFn, value, resolve, reject) {
   try {
     // 如果then方法中的onFulfilled或onRejected函数的返回值是一个Promise对象，
     // 那么Promise链中的下一个Promise对象的状态由该Promise对象进行接管
-    // 通过thenFlag来标识then方法回调函数的生命周期(开始 => 结束)
-    thenFlag = true
     const result = execFn(value)
-    thenFlag = false
-    // 返回值可能是thenablw对象、promise对象和其它值
-    if (result instanceof HYPromise || result?.then instanceof Function) {
+
+    // 返回值可能是thenable对象、promise对象和其它值
+    if (result instanceof HYPromise || result?.then instanceof Function)
       result.then(resolve, reject)
-    } else {
-      resolve(result)
-    }
+    else resolve(result)
   } catch (err) {
     reject(err)
   }
@@ -62,7 +49,7 @@ class HYPromise {
           if (this.status !== PROMISE_STATUS_PENDING) return
           this.status = PROMISE_STATUS_REJECTED
           this.reason = reason
-          if (!thenPromiseList.has(this) && this.onRejectedFns.length === 0) {
+          if (this.onRejectedFns.length === 0) {
             throw new Error(reason)
           }
           this.onRejectedFns.forEach((fn) => fn())
@@ -77,9 +64,6 @@ class HYPromise {
     } catch (err) {
       reject(err)
     }
-
-    // 将在then方法的回调函数中创建的promise对象放进thenPromiseList中
-    if (thenFlag) thenPromiseList.add(this)
   }
 
   then(onFulfilled, onRejected) {
@@ -250,7 +234,7 @@ const p1 = new HYPromise((resolve, reject) => {
 const p2 = p1
   .then((res) => {
     return new HYPromise((resolve, reject) => {
-      // throw new Error('err')
+      // throw new Error('err1')
       setTimeout(() => {
         console.log(res)
         resolve('p2')
@@ -260,7 +244,7 @@ const p2 = p1
   .then((res) => {
     return {
       then(resolve, reject) {
-        throw new Error('err')
+        throw new Error('err2')
         setTimeout(() => {
           console.log(res)
           resolve('p3')
@@ -268,6 +252,6 @@ const p2 = p1
       }
     }
   })
-const p3 = p2.catch((err) => {
-  console.log(err.message)
-})
+// const p3 = p2.catch((err) => {
+//   console.log(err.message)
+// })
