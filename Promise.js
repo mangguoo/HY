@@ -234,6 +234,7 @@ const p1 = new HYPromise((resolve, reject) => {
 const p2 = p1
   .then((res) => {
     return new HYPromise((resolve, reject) => {
+      // reject('err4')
       // throw new Error('err1')
       setTimeout(() => {
         console.log(res)
@@ -244,7 +245,8 @@ const p2 = p1
   .then((res) => {
     return {
       then(resolve, reject) {
-        throw new Error('err2')
+        reject('err3')
+        // throw new Error('err2')
         setTimeout(() => {
           console.log(res)
           resolve('p3')
@@ -252,6 +254,6 @@ const p2 = p1
       }
     }
   })
-// const p3 = p2.catch((err) => {
-//   console.log(err.message)
-// })
+const p3 = p2.catch((err) => {
+  console.log(err)
+})
